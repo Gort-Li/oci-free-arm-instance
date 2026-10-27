@@ -46,8 +46,14 @@ jobs:
           region=${{ env.OCI_REGION }}
           EOF
 
-          # 抑制私钥的安全提示，避免干扰日志解析
-          echo "SUPPRESS_LABEL_WARNING=True" >> $GITHUB_ENV
+          # 收紧 config 权限，避免 OCI CLI 打印 "config are too open" 警告污染输出
+          chmod 600 ~/.oci/config
+
+          # 抑制文件权限警告（OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING）与私钥标签警告
+          {
+            echo "OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True"
+            echo "SUPPRESS_LABEL_WARNING=True"
+          } >> $GITHUB_ENV
 
           echo "OCI CLI 配置完成，区域：${{ env.OCI_REGION }}"
 
@@ -68,7 +74,8 @@ jobs:
             if JOB_OUTPUT=$(oci resource-manager job create-apply-job \
               --stack-id "$STACK_OCID" \
               --execution-plan-strategy AUTO_APPROVED 2>&1); then
-              JOB_ID=$(echo "$JOB_OUTPUT" | jq -r '.data.id')
+              # 剥离可能出现在 JSON 前的警告文本，只把从首个 { 开始的纯 JSON 交给 jq
+              JOB_ID=$(echo "$JOB_OUTPUT" | sed 's/^[^{]*{/{/' | jq -r '.data.id')
               break
             else
               echo "创建 apply 作业失败（第 ${attempt} 次），错误如下，3 秒后重试..."
