@@ -70,18 +70,17 @@ jobs:
 
           # 1) 发起 apply 作业（创建失败则重试几次）
           # 注意: create-apply-job 不接受 --compartment-id，compartment 会从 --stack-id 自动推断
+          # 用 --query + --raw-output 让 CLI 只输出纯 job id，避免手写解析 JSON
           for attempt in 1 2 3; do
-            if JOB_OUTPUT=$(oci resource-manager job create-apply-job \
+            JOB_ID=$(oci resource-manager job create-apply-job \
               --stack-id "$STACK_OCID" \
-              --execution-plan-strategy AUTO_APPROVED 2>&1); then
-              # 剥离可能出现在 JSON 前的警告文本，只把从首个 { 开始的纯 JSON 交给 jq
-              JOB_ID=$(echo "$JOB_OUTPUT" | sed 's/^[^{]*{/{/' | jq -r '.data.id')
+              --execution-plan-strategy AUTO_APPROVED \
+              --query 'data.id' --raw-output 2>/dev/null)
+            if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "null" ]; then
               break
-            else
-              echo "创建 apply 作业失败（第 ${attempt} 次），错误如下，3 秒后重试..."
-              echo "$JOB_OUTPUT"
-              sleep 3
             fi
+            echo "创建 apply 作业失败（第 ${attempt} 次），结果为空，3 秒后重试..."
+            sleep 3
           done
 
           if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
