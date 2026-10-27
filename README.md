@@ -1,167 +1,179 @@
-# OCI Always Free Arm (A1.Flex) VM Creator
+# OCI 永久免费 Arm 实例自动抢购（IntNet-Proxy）
 
-[![Try to Create OCI VM](https://github.com/heykapil/oci-free-arm-instance/actions/workflows/create-vm.yml/badge.svg)](https://github.com/heykapil/oci-free-arm-instance/actions/workflows/create-vm.yml)
+本仓库利用 **GitHub Actions** 定时调用你在 Oracle Cloud（OCI）上**已保存的 Stack（Resource Manager）**，反复尝试创建一台永久免费（Always Free）的 `VM.Standard.A1.Flex`（Ampere/ARM）实例，直到抢到为止。
 
-This repository contains a GitHub Actions workflow that automatically tries to provision an "Always Free" `VM.Standard.A1.Flex` (Arm) compute instance in your Oracle Cloud Infrastructure (OCI) account.
+## 为什么需要"抢"？
 
-This is necessary because the "Always Free" Arm instances are a popular resource and are often unavailable due to high demand, resulting in an `"Out of host capacity."` error. You can try to upgrade to `pay as you go` plan which has a very good chance of getting available instance. Be sure to remain in free limits and check your costs frequently.
+OCI 的永久免费 ARM 实例因为太热门，常年处于 `Out of host capacity`（主机容量不足）状态，手动创建很难成功。本项目让 GitHub 每 5 分钟自动帮你跑一次 apply，成功率大大提升。
 
-## Features
-
-* **Fully Automated:** Runs entirely within GitHub Actions. You don't need to run anything on your local machine.
-* **Persistent:** The workflow runs on a 10-minute schedule, continuously retrying until it successfully provisions your VM.
-* **Secure:** All sensitive credentials, keys, and IDs are stored in encrypted GitHub Secrets. The repository itself contains no private information and is safe to be public.
-* **Fast:** Uses GitHub's caching to store the `oci-cli` installation, so subsequent runs are much faster.
-* **Informative:** Sends detailed notifications to a Discord channel on every attempt, showing the full success or error log (e.g., "Out of host capacity").
+> 配置区域：**Japan Central (Osaka)**，即 `ap-osaka-1`。
+> 实例规格（由你的 Stack 内部固化，本项目不覆盖）：Ampere A1.Flex、4 OCPU / 24 GB、Ubuntu 22.04、200GB 启动盘、主机名 **IntNet-Proxy**。网络、SSH 密钥均已内置在你保存的 Stack 里。
 
 ---
 
-## How to Use
+## 通知机制（重点）
 
-To use this, you need to **Fork** this repository and set up your OCI credentials as GitHub Secrets.
+GitHub Actions 默认**只在工作流运行失败时**给你发邮件通知。本项目正好利用这一特性，让通知完全符合你的要求：
 
-### Prerequisites
+- **没抢到**（apply 作业失败 / 无容量）→ 工作流保持**成功** → **不打扰你**，后台静默每 5 分钟重试。
+- **抢到了**（apply 作业成功）→ 工作流**故意失败**（`exit 1`）→ **触发 GitHub 邮件通知你**。
 
-* An Oracle Cloud Infrastructure (OCI) "Always Free" account.
-* A GitHub account.
-* A Discord server/channel to receive notifications.
-
----
-
-## Step 1: Fork This Repository
-
-Click the **"Fork"** button at the top-right of this page. This will create a copy of this repository in your own GitHub account. All the following steps will be done on **your fork**.
-
-## Step 2: Generate Your OCI API Credentials
-
-This is the most detailed step. You need to gather **11 pieces of information** from your OCI account and your computer.
-
-### A. Core IDs (Tenancy, User, Region)
-
-1.  Log in to your OCI Console.
-2.  **Tenancy OCID:** Click your **Profile icon** (top right) -> **Tenancy: [your\_tenancy\_name]**.
-    * Copy the **OCID** value. This is your `OCI_CLI_TENANCY`.
-    * *Note: For "Always Free" accounts, this is also your `COMPARTMENT_ID`.*
-3.  **User OCID:** Click your **Profile icon** -> **User Settings**.
-    * Copy the **OCID** value. This is your `OCI_CLI_USER`.
-4.  **Region Identifier:** Look in the top-right corner of the console (e.g., "Singapore").
-    * Hover over it or click it to find the identifier (e.g., `ap-singapore-1`). This is your `OCI_CLI_REGION`.
-
-### B. OCI API Key (Private Key & Fingerprint)
-
-1.  On the same **User Settings** page, click **"API Keys"** from the left-hand menu.
-2.  Click the **"Add API Key"** button.
-3.  Select **"Generate API Key Pair"**.
-4.  Click **"Download Private Key"** and save the `oci_api_key.pem` file. **Do not lose this file.**
-5.  Click the **"Add"** button.
-6.  A "Configuration File Preview" will pop up. From this box, copy the `fingerprint` value. This is your `OCI_CLI_FINGERPRINT`.
-
-### C. VM-Specific IDs (Subnet, Image, AD)
-
-1.  **Subnet ID:**
-    * Go to the OCI Console menu (☰) -> **Networking** -> **Virtual Cloud Networks**.
-    * Click on your VCN (there is likely one default VCN).
-    * Click on **"Subnets"** in the left menu.
-    * Click on your public subnet (e.g., `Public Subnet ...`).
-    * Copy the **OCID** of the subnet. This is your `SUBNET_ID`.
-2.  **Availability Domain (AD) Name:**
-    * Go to the OCI Console menu (☰) -> **Compute** -> **Instances**.
-    * Click **"Create Instance"**.
-    * In the **"Placement"** section, look at the **"Availability Domain"** dropdown. You likely only have one.
-    * Copy its name *exactly* as it appears (e.g., `KClJ:AP-SINGAPORE-1-AD-1`). This is your `AD_NAME`.
-3.  **Image ID:**
-    * On the same "Create Instance" page, in the **"Image and shape"** section, click **"Change Image"**.
-    * Select **"Canonical Ubuntu"** (or another OS of your choice).
-    * Click the name of the image (e.g., "Canonical Ubuntu 22.04"). A details panel will slide out.
-    * Copy the **OCID** of the image. This is your `IMAGE_ID`.
-    * You can now cancel the "Create Instance" wizard.
-    * If you still can not find the image, check this website and choose your image and copy ocid mentioned according to region. <https://docs.oracle.com/en-us/iaas/images/>
-    * set this `IMAGE_ID` in your action env.
-4.  **OCPUs and RAM**
-    * The default settings in this action is to provision instance with 2 OCPUs and 12 GB memory.
-    * you can change this in action line 59 `--shape-config '{"ocpus":2,"memoryInGBs":12}' \`
-6. **Boot Volume and Name**
-    * The default settings in this action is to provision instance with `100`GB boot volume with name `coolify-vm`.
-    * you can change bootvolume in action line 65 `--boot-volume-size-in-gbs 100' \`
-    * you can change instance name in same command (action line 64) `--display-name "coolify-vm"`
-   
-### D. Your SSH Public Key
-
-This is the key you will use to log in to your new server.
-
-1.  Open a terminal on your computer.
-2.  Check if you have a key: `cat ~/.ssh/id_rsa.pub`
-3.  **If it shows a key:** Copy the entire output (it starts with `ssh-rsa...`). This is your `SSH_PUBLIC_KEY`.
-4.  **If it shows "No such file":** Run `ssh-keygen -t rsa -b 2048`. Press Enter three times to accept the defaults. Then, run `cat ~/.ssh/id_rsa.pub` again and copy the key.
+因此整个过程中你只会收到**一封**邮件——也就是实例创建成功的那一刻。
 
 ---
 
-## Step 3: Create a Discord Webhook
+## 使用步骤
 
-1.  Open your Discord server. Right-click on a channel name and click **"Edit Channel"**.
-2.  Go to the **"Integrations"** tab.
-3.  Click **"Webhooks"** -> **"New Webhook"**.
-4.  Give it a name (e.g., "OCI Notifier") and click **"Copy Webhook URL"**.
+### 第 1 步：Fork 本仓库
+
+点击仓库右上角的 **Fork**，在你自己账号下创建一份副本。之后的配置都在你的副本上进行。
+
+### 第 2 步：准备 OCI 信息
+
+登录 OCI 控制台，确认你在 **Japan Central (Osaka)** 区域，并收集以下信息：
+
+1. **Tenancy OCID**：点头像 → **Tenancy: [名字]** → 复制 **OCID**。（本项目中它同时充当 compartment）
+2. **User OCID**：点头像 → **User Settings** → 复制 **OCID**。
+3. **API 私钥 & 指纹**：见下方"获取 API 密钥与 fingerprint"。
+4. **Stack OCID**：进入 **Developer Services** → **Resource Manager** → **Stacks**，打开你保存的那个 Stack，复制它的 **OCID**（形如 `ocid1.stack.oc1.ap-osaka-1.xxx...`）。
+
+### 获取 API 密钥与 fingerprint
+
+指纹（fingerprint）**不是**在向导里现场生成的，而是 OCI 根据你的公钥算出来的，**要等你点"Add"提交之后才会显示**。按以下步骤操作：
+
+1. 进入 **User Settings** → **Resources**（左侧）→ **API Keys** → 点 **Add API Key**。
+2. 在向导中选择 **Generate API key pair** → 点 **Generate API key pair** → 点 **Download private key** 下载 `oci_api_key.pem`，并妥善保存。
+   - ⚠️ 私钥只会给你下载一次；下载后可顺手 **Download public key** 留作备用。
+3. 点向导底部的 **Add** 按钮提交。
+4. 提交后 OCI 会弹出 **Configuration File Preview** 窗口，里面有一行：
+   ```
+   fingerprint=8f:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx
+   ```
+   把 `8f:...` 这一段复制下来，就是你要填的 `OCI_CLI_FINGERPRINT`。
+5. 如果弹窗已关闭：回到 **API Keys** 列表，找到刚才的 key，点右侧 **"..."** → 选 **View Configuration File**（或 Copy Configuration），里面的 `fingerprint=` 值即是它。
+
+> 💡 备选（本地推算 fingerprint）：在有 OpenSSL 的环境（如 Git Bash / WSL）下运行
+> `openssl rsa -pubout -outform DER -in oci_api_key.pem | openssl md5 -c`，
+> 输出括号里的那串即 fingerprint，与控制台显示一致。
+
+### 配置 GitHub Secrets 的详细说明
+
+在配置 Secret 前，先说明两个最容易出错的字段，避免填错导致鉴权失败：
+
+**`OCI_CLI_FINGERPRINT`**：填上面第 4/5 步拿到的 `8f:xx:...` 那串（含冒号），不含 `fingerprint=` 前缀。
+
+**`OCI_CLI_KEY_CONTENT`**：必须填 `oci_api_key.pem` 文件的**完整内容**，且**必须包含首尾两行**，缺失这两行会让私钥文件结构不完整、解析失败：
+```
+-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDi...
+（中间所有字符原样保留，不要省略）
+-----END PRIVATE KEY-----
+```
+从 `-----BEGIN PRIVATE KEY-----` 那一行开始复制，到 `-----END PRIVATE KEY-----` 那一行结束，**整段粘贴**进填写框，前后不要多加空格或空行。
+
+### 第 3 步：配置 GitHub Secrets（敏感信息，不会进入仓库）
+
+> ⚠️ 请确认你的 Stack 是在 Osaka 区创建，且其中的实例配置为：A1.Flex、4 OCPU / 24GB、Ubuntu 22.04、200GB、主机名 IntNet-Proxy。
+
+到你 fork 的仓库：**Settings** → **Secrets and variables** → **Actions** → **New repository secret**，逐个添加以下 6 个：
+
+| Secret 名称 | 值 |
+|-------------|----|
+| `STACK_OCID` | 上方拿到的 **Stack OCID** |
+| `OCI_CLI_REGION` | `ap-osaka-1` |
+| `OCI_CLI_USER` | 你的 **User OCID** |
+| `OCI_CLI_TENANCY` | 你的 **Tenancy OCID**（同时作为 compartment） |
+| `OCI_CLI_FINGERPRINT` | 上文拿到的 `8f:...` 那串 fingerprint |
+| `OCI_CLI_KEY_CONTENT` | `oci_api_key.pem` 文件的**完整内容**（**必须含** `-----BEGIN PRIVATE KEY-----` 和 `-----END PRIVATE KEY-----` 两行） |
+
+### 第 4 步：开启失败邮件通知
+
+1. GitHub 右上角点头像 → **Settings** → **Notifications**。
+2. 在 **Actions** 相关区域，将邮件通知设置为**仅在失败时通知**（例如只勾选 "Failures"，不要勾选 "Success" 和 "Warnings"）。
+3. 确认你 GitHub 绑定的邮箱能正常接收 GitHub 通知邮件。
+
+> 💡 务必保证“成功”不通知、“失败”才通知——这正是本项目“抢到才提醒”的关键前提。
+
+### 第 5 步：如何验证配置是否正常（详细指南）
+
+先手动触发一次，确认整套链路没问题，再交给定时任务。验证分三个层级，从浅到深排查。
+
+#### 5.1 触发一次手动运行
+
+1. 进入仓库 **Actions** 页签，左侧点 **Try to Create OCI VM (IntNet-Proxy)**。
+2. 右侧点 **Run workflow** → 再次点 **Run workflow**，就会开始一次运行。
+3. 点开这次运行，逐个展开步骤看日志（下文的每一步都能看到对应名字）。
+
+#### 5.2 逐级看日志，判断卡在哪一层
+
+**第 1 层：OCI CLI 是否配置成功**
+- 看 **安装 OCI CLI 并写入 OCI 配置** 这一步。
+- ✅ 正常：日志末尾出现 `OCI CLI 配置完成，区域：ap-osaka-1`。
+- ❌ 报错：多为私钥格式问题或网络。检查 `OCI_CLI_KEY_CONTENT` 是否完整粘贴（包含 `-----BEGIN PRIVATE KEY-----` 与 `-----END PRIVATE KEY-----`）。
+
+**第 2 层：鉴权 / Stack 是否有效**
+- 看 **触发 Stack Apply 作业并轮询结果** 这一步的开头。
+- ✅ 正常：出现 `创建 apply 作业……` 最终打印 `Apply 作业 ID: ocid1.job...`。
+- ❌ 出现 `无法创建 apply 作业`,说明鉴权失败或 `STACK_OCID` 无效。原因排查顺序：
+  1. `STACK_OCID` 是否填的是你 Osaka 区 Stack 的 OCID；
+  2. `OCI_CLI_REGION` 是否为 `ap-osaka-1`；
+  3. `OCI_CLI_USER` / `OCI_CLI_TENANCY` / `OCI_CLI_FINGERPRINT` / `OCI_CLI_KEY_CONTENT` 是否与 **同一个**用户的一整套 API 凭据匹配。
+
+**第 3 层：作业是否真的在抢资源**
+- 正常会看到循环输出 `轮询 #N: 作业状态 = ...`。
+- 有这行输出，就说明已经发起了一次真实的 OCI apply，正在等结果，链路完全正常。
+
+#### 5.3 判定最终结果（重要）
+
+看最后一层 **通知处理** 的日志和整个运行的"红/绿"状态：
+
+| 现场表现 | 含义 | 你需要做什么 |
+|---------|------|-------------|
+| 日志打印 `✓ 已成功创建 IntNet-Proxy 实例！`，且**整个运行是红色（失败）** | ✅ **抢到了！** 这就是触发了邮件 | 立刻按"收到成功邮件后必做"禁用工作流 |
+| 日志打印 `未抢到实例……静默等待下一次重试`，且**整个运行是绿色（成功）** | ⏳ 还没抢到，一切都正常 | 什么都不用做，等邮件 |
+| 一直在轮询、中途本轮结束（绿色） | ⏳ 还在等容量 | 不用干预，下次继续 |
+| 卡在第 1/2 层报错 | ❌ 配置有问题 | 按 5.2 排查 |
+
+> 🎯 **判定口诀**：【红色=成功（抢到了），绿色=未抢到（继续等）】。千万不要把红色当成故障——红色恰恰是你想看到的结果。
+
+#### 5.4（可选）本机快速自测
+
+如果你想在**不用 GitHub 的前提下**先验证凭据和 Stack 是否可用，可以在装了 OCI CLI 的电脑上（或任一处）运行：
+
+```bash
+oci resource-manager stack get --stack-id <你的STACK_OCID>
+```
+
+能返回该 Stack 的信息，即证明这套 API 凭据+Stack OCID 组合是有效的，问题大概率不在账户而在 GitHub Secrets 拼写。
+
+### 第 6 步：交给定时任务
+
+测试没问题后就不用管了。从这里开始，GitHub 会**每 5 分钟自动跑一次**，默默帮你抢。没抢到就一直静默重试，不打扰你。
 
 ---
 
-## Step 4: Configure GitHub Secrets
+## 🚨 收到成功邮件后必做
 
-Go to your forked repository on GitHub.
+当你收到 GitHub 邮件通知（也就是实例抢到了），**务必立刻停止无人值守的自动创建**，否则下一轮它会尝试再建一台：
 
-1.  Click the **"Settings"** tab.
-2.  In the left menu, click **"Secrets and variables"** -> **"Actions"**.
-3.  Click the **"New repository secret"** button for *each* of the 11 secrets listed below.
+1. 进入仓库 **Actions** 页签，左侧点 **Try to Create OCI VM (IntNet-Proxy)**。
+2. 点右上角 **三个点 (…)** 菜单 → **Disable workflow**（禁用工作流）。
 
-#### **VM Secrets**
-
-* `OCI_COMPARTMENT_ID` (Value: Your Tenancy OCID from Step 2A)
-* `IMAGE_ID` (Value: Your Image OCID from Step 2C)
-* `OCI_SUBNET_ID` (Value: Your Subnet OCID from Step 2C)
-* `AD_NAME` (Value: Your Availability Domain name from Step 2C)
-* `SSH_PUBLIC_KEY` (Value: The `ssh-rsa...` key from Step 2D)
-
-#### **Authentication Secrets**
-
-* `OCI_CLI_REGION` (Value: Your region from Step 2A, e.g., `ap-singapore-1`)
-* `OCI_CLI_USER` (Value: Your User OCID from Step 2A)
-* `OCI_CLI_TENANCY` (Value: Your Tenancy OCID from Step 2A)
-* `OCI_CLI_FINGERPRINT` (Value: The fingerprint from Step 2B)
-* `OCI_CLI_KEY_CONTENT` (Value: Open the `oci_api_key.pem` file you downloaded in Step 2B with a text editor. Copy the *entire contents*, from `-----BEGIN PRIVATE KEY-----` to `-----END PRIVATE KEY-----`, and paste it here.)
-
-#### **Notification Secret**
-
-* `DISCORD_WEBHOOK_URL` (Value: The URL you copied from Discord in Step 3)
+之后去 OCI 控制台的 **Compute → Instances** 确认你的 `IntNet-Proxy` 实例正在启动，用你在 Stack 里配置的 SSH 密钥登录即可。
 
 ---
 
-## Step 5: Run the Workflow
+## 常见问题
 
-You're all set! Now you just need to start the process.
+**Q：为什么总是停在轮询、显示 FAILED？**
+正常，说明 OCI 暂时没有空余的 A1.Flex 容量。工作流会自动继续每 5 分钟重试，不用干预。
 
-1.  Go to the **"Actions"** tab of your forked repository.
-2.  In the left sidebar, click on **"Try to Create OCI VM"**.
-3.  You will see a message: "This workflow has a `workflow_dispatch` event." Click the **"Run workflow"** button on the right, and then **"Run workflow"** again.
+**Q：不小心没禁用工作流，会不会重复建实例？**
+这种场景仅当第二次又抢到容量才会出现，风险不大。但为稳妥，收到邮件后请务必按上文禁用工作流。
 
-This will start the first run. From now on, the `schedule` will automatically run it every 10 minutes. You can check the "Actions" tab to see the logs from each run. You will also get a notification in Discord every time it tries.
-
----
-
-## 🚨 CRITICAL: What to Do on Success
-
-One day, you will get a **green "success"** notification in Discord. This means your VM has been created!
-
-As soon as you see this, you **MUST** disable the workflow.
-
-1.  Go to the **"Actions"** tab in your repository.
-2.  Click on **"Try to Create OCI VM"** in the sidebar.
-3.  Click the **three-dot (...)** menu on the right.
-4.  Click **"Disable workflow"**.
-
-If you do not do this, the action will continue running every 10 minutes and will try to create *another* VM, which will just fill your logs with errors.
-
-Your VM will be provisioning in the OCI console. You can now log in using the SSH key you provided.
+**Q：换区域怎么办？**
+把 Secrets 里的 `OCI_CLI_REGION` 改成目标区域（如 `ap-singapore-1`），并把 `STACK_OCID` 换成对应区域的 Stack。Stack 本身限制了所在区域，需在对应区域创建。
 
 ## License
 
-This repository is available under the [MIT License](LICENSE).
+[MIT](LICENSE)

@@ -1,96 +1,117 @@
-name: Try to Create OCI VM
-# It will run every 5 minutes.
+name: Try to Create OCI VM (IntNet-Proxy)
+
+# 每 5 分钟自动尝试一次：抢不到资源时保持安静，抢到资源时故意失败以触发 GitHub 邮件通知。
 on:
   schedule:
     - cron: "*/5 * * * *"
-  # Allows you to manually run this workflow from the Actions tab
+  # 允许你在 Actions 页面手动触发一次，便于首次测试配置是否正确。
   workflow_dispatch:
+
 env:
-  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-  IMAGE_ID: "ocid1.image.oc1.ap-singapore-1.aaaaaaaa5a3xwkk5vaichk47fms2uzvsqeriats2uorf6kwgq3l3nwrbhipa"
-  SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-  AD_NAME: "KClJ:AP-SINGAPORE-1-AD-1"
-  OCI_CLI_REGION: "ap-singapore-1"
-  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
-  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
-  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
-  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  # 区域：Japan Central (Osaka)。全局变量来自 GitHub Secrets。
+  OCI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  # 免费账户的 compartment 与 tenancy 相同，直接用 tenancy OCID。
+  COMPARTMENT_ID: ${{ secrets.OCI_CLI_TENANCY }}
+  STACK_OCID: ${{ secrets.STACK_OCID }}
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Cache pip packages
+      - name: 缓存 OCI CLI 的 pip 安装（加速后续每次运行）
         id: cache-pip
         uses: actions/cache@v4
         with:
           path: ~/.local
           key: ${{ runner.os }}-pip-oci-cli-v1
 
-      - name: Add OCI CLI to path
+      - name: 将 OCI CLI 加入 PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Setup OCI CLI and Try to Create VM
-        id: create_vm
-        # This forces the job to succeed so the cache will save.
-        continue-on-error: true 
+      - name: 安装 OCI CLI 并写入 OCI 配置
         run: |
-          set -o pipefail
-
+          set -e
           pip install oci-cli
 
           mkdir -p ~/.oci
           echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
-          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
-          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
-          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
-          echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_CLI_USER }}
+          tenancy=${{ secrets.OCI_CLI_TENANCY }}
+          fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}
+          key_file=~/.oci/oci_api_key.pem
+          region=${{ env.OCI_REGION }}
+          EOF
 
-          # Run the command, capture ALL output, and use '|| true' to prevent the script from exiting early.
-          OCI_OUTPUT=$(oci compute instance launch \
-            --compartment-id "$COMPARTMENT_ID" \
-            --availability-domain "$AD_NAME" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-            --subnet-id "$SUBNET_ID" \
-            --image-id "$IMAGE_ID" \
-            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
-            --assign-public-ip true \
-            --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 200 2>&1 || true)
+          echo "OCI CLI 配置完成，区域：${{ env.OCI_REGION }}"
 
-          # Store the log as a GitHub step output
-          echo "log_data<<EOF" >> $GITHUB_OUTPUT
-          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+      # 触发云上已有 Stack 的 apply 作业，并轮询直到出结果。
+      # 该步骤始终以成功退出（静默），是否邮件通知由下一步决定。
+      - name: 触发 Stack Apply 作业并轮询结果
+        id: apply
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-          # Check the log content for an error string.
-          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "Success! 'PROVISIONING' state found in output."
+          JOB_ID=""
+          APPLY_RESULT="timeout"
+
+          # 1) 发起 apply 作业（创建失败则重试几次）
+          for attempt in 1 2 3; do
+            if JOB_OUTPUT=$(oci resource-manager job create-apply \
+              --stack-id "$STACK_OCID" \
+              --compartment-id "$COMPARTMENT_ID" 2>&1); then
+              JOB_ID=$(echo "$JOB_OUTPUT" | jq -r '.data.id')
+              break
+            else
+              echo "创建 apply 作业失败（第 ${attempt} 次），3 秒后重试..."
+              sleep 3
+            fi
+          done
+
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "无法创建 apply 作业（可能是配置或调用出错），本次视为未抢到，保持静默。"
+            echo "apply_result=unavailable" >> $GITHUB_OUTPUT
             exit 0
-          else
-            echo "Error: Success string not found in OCI output. Failing the step."
-            exit 1
           fi
 
-      - name: Send Discord Notification
-        if: always()
-        uses: sarisia/actions-status-discord@v1.15.4
-        with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
-          description: |
-            Attempt to create A1.Flex VM.
-            **Status:** `${{ steps.create_vm.outcome }}`
+          echo "Apply 作业 ID: $JOB_ID"
 
-            **Log Output:**
-            ```json
-            ${{ steps.create_vm.outputs.log_data }}
-            ```
+          # 2) 轮询作业状态，直到结束或超时（最长约 30 分钟）
+          for i in $(seq 1 180); do
+            STATUS=$(oci resource-manager job get \
+              --job-id "$JOB_ID" \
+              --query 'data."lifecycle-state"' \
+              --raw-output 2>/dev/null || echo "UNKNOWN")
+            echo "轮询 #$i: 作业状态 = $STATUS"
+            case "$STATUS" in
+              SUCCEEDED) APPLY_RESULT="success"; break ;;
+              FAILED | CANCELED) APPLY_RESULT="failed"; break ;;
+            esac
+            sleep 10
+          done
+
+          echo "=== 最终结果: $APPLY_RESULT ==="
+          echo "apply_result=$APPLY_RESULT" >> $GITHUB_OUTPUT
+          exit 0
+
+      # 通知逻辑：
+      #   - 抢到实例（apply 成功）-> 故意使运行失败 -> GitHub 邮件通知你；
+      #   - 未抢到 -> 保持成功 -> 静默等待下一轮重试。
+      - name: 通知处理（抢到实例则故意失败以触发邮件）
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.apply.outputs.apply_result }}" = "success" ]; then
+            echo "======================================================"
+            echo "  ✓ 已成功创建 IntNet-Proxy 实例！"
+            echo "  故意使本次运行失败，从而触发 GitHub 邮件通知你。"
+            echo "  收到邮件后请立即到 Actions 页禁用本工作流，避免重复创建。"
+            echo "======================================================"
+            exit 1
+          fi
+          echo "未抢到实例（可能无主机容量），保持成功状态，静默等待下一次重试..."
+          exit 0
