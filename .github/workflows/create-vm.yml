@@ -68,6 +68,25 @@ jobs:
           JOB_ID=""
           APPLY_RESULT="timeout"
 
+          # 0) 防重复创建：先检查实例是否已存在（防止抢到后未及时禁用工作流导致重复创建）
+          #    从 OCI config 提取 tenancy（实例与 Stack 同属该 compartment），列出实例并匹配主机名
+          TENANCY_OCID=$(sed -n 's/^tenancy[[:space:]]*=[[:space:]]*//p' ~/.oci/config | head -n1)
+          if [ -n "$TENANCY_OCID" ]; then
+            EXISTING=$(oci compute instance list \
+              --compartment-id "$TENANCY_OCID" \
+              --all \
+              --query 'data[?"display-name"==`IntNet-Proxy` && "lifecycle-state"!=`TERMINATED`].id' \
+              --raw-output 2>/dev/null || true)
+            if [ -n "$EXISTING" ]; then
+              echo "检测到已存在目标实例（IntNet-Proxy），不再创建，本次静默跳过。实例 OCID: $EXISTING"
+              echo "apply_result=already_exists" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "未发现已存在的 IntNet-Proxy 实例，继续发起创建。"
+          else
+            echo "未能从 config 提取 tenancy，跳过实例存在性检查（仅作为防护兜底，不阻塞创建）。"
+          fi
+
           # 1) 发起 apply 作业（创建失败则重试几次）
           # 注意: create-apply-job 不接受 --compartment-id，compartment 会从 --stack-id 自动推断
           # 用 --query + --raw-output 让 CLI 只输出纯 job id，避免手写解析 JSON
@@ -75,7 +94,7 @@ jobs:
             JOB_ID=$(oci resource-manager job create-apply-job \
               --stack-id "$STACK_OCID" \
               --execution-plan-strategy AUTO_APPROVED \
-              --query 'data.id' --raw-output 2>/dev/null)
+              --query 'data.id' --raw-output 2>/dev/null || true)
             if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "null" ]; then
               break
             fi
@@ -105,24 +124,60 @@ jobs:
             sleep 10
           done
 
+          # 3) 若失败，拉取该工作 Terraform 日志，判断是否是无容量（正常抢不到）还是其它错误（需告警）
+          if [ "$APPLY_RESULT" = "failed" ]; then
+            TF_LOG=$(oci resource-manager job get-job-tf-logs \
+              --job-id "$JOB_ID" 2>/dev/null || true)
+            if echo "$TF_LOG" | grep -qi "host capacity" || echo "$TF_LOG" | grep -qi "OutOfHostCapacity"; then
+              APPLY_RESULT="failed_capacity"
+            else
+              APPLY_RESULT="failed_other"
+            fi
+            if [ "$APPLY_RESULT" = "failed_other" ]; then
+              echo "----- 以下为非容量错误的作业日志尾部，便于排查 -----"
+              echo "$TF_LOG" | tail -n 40
+            fi
+          fi
+
           echo "=== 最终结果: $APPLY_RESULT ==="
           echo "apply_result=$APPLY_RESULT" >> $GITHUB_OUTPUT
           exit 0
 
       # 通知逻辑：
-      #   - 抢到实例（apply 成功）-> 故意使运行失败 -> GitHub 邮件通知你；
-      #   - 未抢到 -> 保持成功 -> 静默等待下一轮重试。
-      - name: 通知处理（抢到实例则故意失败以触发邮件）
+      #   - success（抢到）        -> 故意使运行失败 -> GitHub 邮件通知你；
+      #   - failed_other（配置错） -> 故意使运行失败 -> 邮件告警，避免静默空等；
+      #   - failed_capacity / already_exists / unavailable / timeout -> 保持成功 -> 静默。
+      - name: 通知处理（抢到实例或异常则故意失败以触发邮件）
         if: always()
         shell: bash
         run: |
-          if [ "${{ steps.apply.outputs.apply_result }}" = "success" ]; then
-            echo "======================================================"
-            echo "  ✓ 已成功创建 IntNet-Proxy 实例！"
-            echo "  故意使本次运行失败，从而触发 GitHub 邮件通知你。"
-            echo "  收到邮件后请立即到 Actions 页禁用本工作流，避免重复创建。"
-            echo "======================================================"
-            exit 1
-          fi
-          echo "未抢到实例（可能无主机容量），保持成功状态，静默等待下一次重试..."
-          exit 0
+          case "${{ steps.apply.outputs.apply_result }}" in
+            success)
+              echo "======================================================"
+              echo "  ✓ 已成功创建 IntNet-Proxy 实例！"
+              echo "  故意使本次运行失败，从而触发 GitHub 邮件通知你。"
+              echo "  收到邮件后请立即到 Actions 页禁用本工作流（或删除实例），避免重复创建。"
+              echo "  注意：即便忘记禁用，工作流也会在下次运行时先检测到实例已存在而自动跳过。"
+              echo "======================================================"
+              exit 1
+              ;;
+            failed_other)
+              echo "======================================================"
+              echo "  ✗ 检测到非容量类错误（可能为配置/凭据/网络问题），"
+              echo "  故意使本次运行失败，触发邮件告警，请及时排查日志。"
+              echo "======================================================"
+              exit 1
+              ;;
+            failed_capacity)
+              echo "实例创建未成功，但原因确认为主机无容量（正常抢不到），保持成功状态，静默等待下一轮重试..."
+              exit 0
+              ;;
+            already_exists)
+              echo "目标实例已存在，无需重复创建，保持成功状态，静默结束本次运行..."
+              exit 0
+              ;;
+            *)
+              echo "未抢到实例（可能无主机容量），保持成功状态，静默等待下一次重试..."
+              exit 0
+              ;;
+          esac
