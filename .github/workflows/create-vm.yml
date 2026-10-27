@@ -126,7 +126,7 @@ jobs:
 
           # 3) 若失败，拉取该工作 Terraform 日志，判断是否是无容量（正常抢不到）还是其它错误（需告警）
           if [ "$APPLY_RESULT" = "failed" ]; then
-            TF_LOG=$(oci resource-manager job get-job-tf-logs \
+            TF_LOG=$(oci resource-manager job get-job-logs \
               --job-id "$JOB_ID" 2>/dev/null || true)
             if echo "$TF_LOG" | grep -qi "host capacity" || echo "$TF_LOG" | grep -qi "OutOfHostCapacity"; then
               APPLY_RESULT="failed_capacity"
